@@ -1,69 +1,109 @@
-Nelson Ruth
-Deduper Pseudocode
-Bi624
+#!/usr/bin/env python
+import re, argparse
 
-BACKGROUND:
-Problem: Our sequencing data contain reads that came from PCR duplicates instead of from the experiment itself. These duplicates will
-confound downstream analysis by giving false positives, suggesting a false increase in gene expression. The duplicates should be removed
-from the data after aligning to a genome. 
+def get_args():
+    parser = argparse.ArgumentParser(description="This script removes PCR duplicates from single-end sequencing data in a sorted sam file.")
+    parser.add_argument("-f", "--sorted_input", help="Your sorted sam file for input. Must be sorted with default samtools sort.", required = True)
+    parser.add_argument("-o", "--output_filename", help="Your output sam filename.", required = True)
+    parser.add_argument("-u", "--umi_filename", help="Your text file containing known umis only in one column.", required = False)
+    parser.add_argument("-p", "--paired_end", help="Type 'Yes' to designate if paired-end file. Default = 'No'.", required = False)
 
-A PCR-duplicate has all of the following traits:
--Same chromosome
--Same starting position
--Same strand
--Same UMI
--We must also take soft-clipping into account when assessing start position of a read
+    return parser.parse_args()
 
-PSEUDOCODE:
-###1 Checking for paired-end reads, removing bad UMIs, and adjusting the start positions based on CIGAR string information 
--import list of UMIs as a list of strings from ST96.txt
+args = get_args()
+sorted_input = args.sorted_input
+output_file = args.output_filename
+umi_filename = args.umi_filename
+if args.paired_end == 'Yes':
+    print("No paired-end functionality. Quitting program.")
+    raise SystemExit
 
-begin reading the file at the first line that doesn't start with @
-with open input.sam as fh:
-    line = fh.readline()
-    line.split() so I can check if paired or single-end and define umi
-    umi = last 8 bases from the QNAME
-    flag = SAM col 3
-    if flag & 16 == 16:
-        #can also add more functionality for mapped, etc
-        print("Input data must be single-end reads.")
-        break
-    elif umi in umi_list:
-        pass CIGAR string to true_start function, write entire entry with updated start position to input_adjusted.sam
-    else:
-        pass
-
-###2: Samtools sorting on the command line
--Sort the input_adjusted.sam file by chromosome position and starting position
--use the default samtools sort command
-
-###3: Deduping the adjusted SAM file
-line_list = []
-with open input_adjusted.sam as fh:
-    write all lines starting with @ to output_deduped.sam
-    line = fh.readline()
-    split line into umi, chromosome, starting position
-
-    if umi and chromosome and starting_pos not in line_list:
-        clear line_list
-        write line to output_deduped.sam
-        append umi and chromosome and start_pos to line_list
-
-    elif umi and chromosome and starting_pos in line_list:
-        write line to output_duped.sam (maybe skip this but it might be nice to have a record of duplicated reads)
-
-HIGH-LEVEL FUNCTIONS
-###1
 def true_start(cigar):
-    """Inputs the cigar string from a line in a sam file, outputs the modifier to be applied to the starting postion"""
-    code (probably an if statement and some regex here)
-    return modifier
+    """
+    ***Adjusts start position based on cigar string, considers strand.
+    ***For forward strand, subtracts left soft-clipping from start position. 
+    ***For reverse strand, adds matches (or mismatches), deletions, skipped regions from reference, and right soft-clipping.
+    """
+    adjusted_start = position
+    if(int(flag) & 16) == 0:       
+        if re.search('(^[0-9]+)S', cigar):
+            modifier = re.findall('(^[0-9]+)S', cigar)[0]
+            adjusted_start = int(position) - int(modifier)
 
-true_start(S3100M)
->3
-true_start(100MS3)
->0
-true_start(25M10N46M)
->0
+    elif(int(flag) & 16) == 16:
+        mod_list = []
+        m_modifier = re.findall('[0-9]+M', cigar)
+        for m in m_modifier:
+            mod_list.append(int(m.split('M')[0]))
 
+        d_modifier = re.findall('[0-9]+D', cigar)
+        for d in d_modifier:
+            mod_list.append(int(d.split('D')[0]))
 
+        n_modifier = re.findall('[0-9]+N', cigar)
+        for n in n_modifier:
+            mod_list.append(int(n.split('N')[0]))
+
+        if re.search('([0-9]+)S$', cigar):
+            s_modifier = re.findall('[0-9]+S$', cigar)[0].split('S')[0]
+            mod_list.append(int(s_modifier))
+
+        adjusted_start = int(position) + sum(mod_list)
+    return adjusted_start
+
+#open file containing umis and create a list of known UMIs
+umi_list = []
+with open(umi_filename, "r") as fh: 
+    for line in fh:
+        line = line.strip()
+        umi_list.append(line)
+
+#create dictionary to hold all records per chromsome 
+#keys = umi, adjusted start position, strand : values = chromosome
+#gets cleared after encountering a new chromosome/scaffold
+line_dict = {}
+
+#for counting wrong umis
+wrong_umi_count = 0
+with open(sorted_input, "r") as fh: 
+    while True:
+        line = fh.readline().strip()
+        if line =="":
+            break
+        #writes header lines to new file
+        if line.startswith('@'):
+            with open(output_file, 'a') as fout:
+                fout.write(f'{line}\n')
+        else:
+            #dividing the line into the relevant parts for later use
+            parts = line.split("\t")
+            umi = parts[0][-8:]
+            chrom = parts[2]
+            flag = parts[1]
+            position = parts[3]
+            cigar = parts[5]
+            strand = int(flag) & 16
+            adj_position = true_start(cigar)
+            #have to make the parts strings to be compatible with true_start output
+            markers = str(umi), str(adj_position), str(strand)
+            #checking for paired end sequencing in case of user error.
+            if (int(flag) & 1) == 1:
+                print("No paired-end functionality.")
+                break
+
+            #checking for unknown umis first
+            if umi in umi_list:
+                #clears line dictionary after finding new chromosome
+                if chrom not in line_dict.values():
+                    #reporting the counts per chromosome/scaffold before clearing
+                    if line_dict:
+                        print(f'Chromosome: {list(line_dict.values())[0]} Count: {len(line_dict)}')
+                        line_dict.clear()
+                #markers must be unique (per chromosome) to be written to deduped file
+                if markers not in line_dict.keys():
+                    line_dict[markers] = chrom
+                    with open(output_file, 'a') as fout:
+                        fout.write(f'{line}\n')  
+            else: 
+                wrong_umi_count += 1
+print(f'Wrong umis: {wrong_umi_count}')
